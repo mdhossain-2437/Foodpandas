@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Myapp</string>
+	<string>Food-Pandas</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,11 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>myapp</string>
-	<key>GMSApiKey</key>
-	<string>$(MAPS_API_KEY)</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Your location is used to set a delivery pin and show restaurants that deliver to you.</string>
+	<string>Food-Pandas</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

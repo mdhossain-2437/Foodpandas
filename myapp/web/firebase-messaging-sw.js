@@ -1,6 +1,7 @@
 /* Firebase web push requires HTTPS and a Web Push certificate (VAPID key). */
-importScripts('https://www.gstatic.com/firebasejs/12.19.0/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging-compat.js');
+/* Keep in sync with supportedFirebaseJsSdkVersion in the resolved firebase_core_web package. */
+importScripts('https://www.gstatic.com/firebasejs/13.1.0/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/13.1.0/firebase-messaging-compat.js');
 
 firebase.initializeApp({
   apiKey: 'AIzaSyDoWmnYep0063Dy9bB1GSFDxhc3-SDbfY4',

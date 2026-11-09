@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: pub
+    directory: /myapp
+    schedule:
+      interval: weekly
+    groups:
+      firebase:
+        patterns: ["firebase_*", "cloud_*"]
+
+  - package-ecosystem: npm
+    directory: /myapp/functions
+    schedule:
+      interval: weekly
+    groups:
+      firebase:
+        patterns: ["firebase-*"]
+      genkit:
+        patterns: ["genkit", "@genkit-ai/*"]
+      eslint:
+        patterns: ["eslint", "@eslint/*", "globals"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

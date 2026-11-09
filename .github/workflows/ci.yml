@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  flutter:
+    name: Flutter analyze, test and web build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: myapp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build web --release
+
+  functions:
+    name: Cloud Functions lint and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: myapp/functions
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: myapp/functions/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  android:
+    name: Android release build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: myapp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      # Without android/key.properties this verifies the build with debug signing.
+      - run: flutter build apk --release

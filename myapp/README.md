@@ -10,21 +10,31 @@ verified Firebase restaurants are managed through trusted Firebase Cloud Functio
 myapp/
 ├── lib/
 │   ├── main.dart             # App shell, ordering UI and verified-checkout gate
+│   ├── bootstrap.dart        # Firebase startup, Crashlytics, App Check, emulators
+│   ├── config/app_config.dart  # --dart-define build settings
 │   ├── firebase_options.dart # FlutterFire platform configuration
-│   ├── screens/
-│   │   └── auth/
-│   │       └── auth_pages.dart
-│   └── services/
-│       └── auth_service.dart
+│   ├── screens/              # Auth, orders, restaurants, AI assistant pages
+│   └── services/             # Firebase-backed services (auth, orders, AI, ...)
+├── functions/
+│   ├── index.js              # Callable/HTTP/Firestore Cloud Functions
+│   ├── ai/                   # Genkit menu assistant, quota, eval dataset
+│   ├── catalog/demo-menu.js  # Server-side sample menu (authoritative prices)
+│   ├── scripts/              # Live-model eval runner
+│   └── test/                 # node:test unit tests
 ├── firestore.rules           # Firebase customer and restaurant access rules
 ├── test/
-│   └── widget_test.dart      # Ordering and verified-checkout tests
+│   └── widget_test.dart      # Ordering, checkout and AI assistant tests
 ├── web/
 │   ├── index.html            # Browser title and app metadata
 │   └── manifest.json
 ├── pubspec.yaml
 └── README.md
 ```
+
+CI (`.github/workflows/ci.yml`) runs `dart format`, `flutter analyze`,
+`flutter test`, a web release build, the Functions lint/tests and an Android
+release build on every pull request. Dependabot keeps pub, npm and GitHub
+Actions dependencies current.
 
 ## Run in a browser
 
@@ -184,7 +194,7 @@ project root:
 firebase deploy --only firestore:rules,firestore:indexes --project foodpandas-f2e83
 ```
 
-### Configure Firebase and Maps
+### Configure Firebase
 
 1. Install the required Flutter packages and configure the missing iOS Firebase
    app using the project owner account:
@@ -196,23 +206,10 @@ firebase deploy --only firestore:rules,firestore:indexes --project foodpandas-f2
 
    `lib/firebase_options.dart` currently has Android and Web entries only.
    The command must register the real iOS bundle ID and generate its options;
-   do not fabricate an iOS app ID or `GoogleService-Info.plist`.
+   do not fabricate an iOS app ID or `GoogleService-Info.plist`. Until then the
+   app shows a "could not start" screen on iOS instead of crashing.
 
-2. Create a Google Maps Platform API key, enable Maps SDK for Android, Maps
-   SDK for iOS, and Maps JavaScript API, and apply platform restrictions. The
-   Maps Flutter package requires a Google Cloud billing account and an API key.
-   Add the key to `android/local.properties`:
-
-   ```properties
-   MAPS_API_KEY=YOUR_RESTRICTED_ANDROID_KEY
-   ```
-
-   Copy `ios/Flutter/Maps.xcconfig.example` to the ignored
-   `ios/Flutter/Maps.xcconfig` file and set its `MAPS_API_KEY`. In `web/index.html`,
-   replace `YOUR_GOOGLE_MAPS_API_KEY` with a key restricted to the deployed web
-   origin. Use separate keys for Android, iOS and Web.
-
-3. In Xcode, enable the Runner target's **Push Notifications** capability and
+2. In Xcode, enable the Runner target's **Push Notifications** capability and
    **Background Modes → Remote notifications**. In Firebase Console, enable
    Cloud Messaging and upload an APNs authentication key for iOS. For web push,
    create a Web Push certificate and provide its
@@ -227,11 +224,13 @@ firebase deploy --only firestore:rules,firestore:indexes --project foodpandas-f2
    `web/firebase-messaging-sw.js` service worker. Without push permission or
    platform credentials, in-app Firebase notifications remain available.
 
-4. Install Firebase CLI, sign in, and deploy the Cloud Functions:
+3. Install Firebase CLI, sign in, and deploy the Cloud Functions:
 
-   Before deploying Functions, configure the Firebase and Xendit settings in
+   Before deploying Functions, configure the Firebase, Xendit and AI settings in
    the sections below. Use a project-specific ignored `.env.foodpandas-f2e83`
-   file or the Firebase CLI prompt for any configured Firebase function values.
+   file or the Firebase CLI prompt for any configured Firebase function values
+   (`AI_MODEL`, `AI_DAILY_REQUEST_LIMIT`, `ENFORCE_APP_CHECK`; press Enter to
+   accept the defaults).
 
    ```powershell
    firebase login
@@ -242,7 +241,9 @@ firebase deploy --only firestore:rules,firestore:indexes --project foodpandas-f2
    ```
 
    Cloud Functions deployment requires the Firebase project to use the Blaze
-   plan. Order-status updates are made by a trusted restaurant/admin backend
+   plan. Functions run on Node.js 24 and are capped at 10 instances each
+   (`setGlobalOptions` in `functions/index.js`); raise the cap deliberately
+   before launches. Order-status updates are made by a trusted restaurant/admin backend
    using `placed`, `preparing`, `ready_for_pickup`, `out_for_delivery`,
    `delivered`, or `cancelled`; e-wallet orders also use `pending_payment`
    until payment completes. Payment statuses are `pending`, `paid`, `failed`,
@@ -325,6 +326,117 @@ Customer profile details are stored in each customer's Firestore
 name, mobile number, delivery address, and the last update timestamp. Firestore
 rules limit customers to their own profile. Real orders and online payments
 require verified Firebase restaurant records and deployed, configured Firebase
-Functions. Maps, rider tracking, and App Check still require production setup;
-do not enable live payments until the merchant and all backend configuration
-have been verified.
+Functions. Rider tracking still requires production setup; do not enable live
+payments until the merchant and all backend configuration have been verified.
+
+## AI food assistant
+
+The **Ask AI** page lets signed-in, email-verified customers describe a craving
+("something sour and soupy under ₱200") and get dishes they can add to the
+cart. It is the first AI feature and sets the pattern for later ones:
+
+- **Server-side only.** The Flutter app calls the `menuAssistant` callable;
+  the Gemini API key never reaches the client. The function runs a
+  [Genkit](https://genkit.dev) flow (`functions/ai/menu-assistant.js`) with the
+  Gemini Developer API.
+- **Grounded output.** The model only sees the verified Firestore catalog plus
+  the sample menu, must answer with a typed schema, and every suggestion is
+  checked against the catalog. Unknown items are dropped and names/prices
+  always come from the catalog, never from the model. Sample items are
+  labeled in the UI.
+- **Guardrails.** Input is length-limited and stripped of prompt delimiters,
+  the system prompt treats the request as untrusted, each user gets
+  `AI_DAILY_REQUEST_LIMIT` requests per UTC day (counted in the server-only
+  `aiUsage` collection), and the function honors `ENFORCE_APP_CHECK`.
+- **Observability.** Every call logs model, prompt version, latency, proposed
+  vs. grounded suggestion counts and token usage to Cloud Logging.
+- **Evaluation.** `functions/ai/evals/menu-assistant.dataset.json` holds golden
+  queries (including off-menu and prompt-injection cases). Run them against the
+  live model before changing the prompt or model, and bump `PROMPT_VERSION`
+  when the prompt changes.
+
+Setup:
+
+```shell
+# Create a key in Google AI Studio, then store it as a Functions secret.
+firebase functions:secrets:set GEMINI_API_KEY --project foodpandas-f2e83
+firebase deploy --only functions:menuAssistant --project foodpandas-f2e83
+```
+
+`AI_MODEL` defaults to the stable `gemini-3.6-flash`. Pin stable model IDs and
+check the [Gemini deprecation schedule](https://ai.google.dev/gemini-api/docs/deprecations)
+before a model is retired. Local development:
+
+```shell
+cd functions
+npm test                          # unit tests with a fake model, no network
+GEMINI_API_KEY=... npm run eval:ai  # live-model eval (optionally -- --model <id>)
+```
+
+## Production operations
+
+### Build-time settings
+
+Pass these with `--dart-define` (or `--dart-define-from-file`):
+
+| Setting | Purpose |
+| --- | --- |
+| `FCM_VAPID_KEY` | Web Push certificate key for web notifications |
+| `ENABLE_APP_CHECK=true` | Activates Firebase App Check (Play Integrity, App Attest, reCAPTCHA Enterprise) |
+| `APP_CHECK_WEB_RECAPTCHA_SITE_KEY` | reCAPTCHA Enterprise site key for App Check on the web |
+| `USE_FIREBASE_EMULATORS=true` | Uses the local Auth/Firestore/Functions emulators |
+| `FIREBASE_EMULATOR_HOST` | Emulator host (`10.0.2.2` from the Android emulator) |
+
+### App Check rollout
+
+1. Register Play Integrity (Android), App Attest/DeviceCheck (iOS) and a
+   reCAPTCHA Enterprise key (web) under **App Check** in the Firebase console.
+2. Ship builds with `--dart-define=ENABLE_APP_CHECK=true` (plus the web site
+   key) and watch the App Check request metrics.
+3. Once most traffic is verified, set `ENFORCE_APP_CHECK=true` for the
+   Functions and redeploy; `createOrder` and `menuAssistant` then reject
+   unverified clients.
+
+### Crash reporting
+
+Firebase Crashlytics records uncaught Flutter and platform errors on Android,
+iOS and macOS release builds (collection is off in debug builds). Startup
+failures, such as a platform without Firebase options, show an explanatory
+screen instead of a blank app.
+
+### Android release
+
+- **Application ID.** `com.example.myapp` cannot be published on Google Play.
+  Choose the final ID, register it as a new Android app in Firebase, replace
+  `android/app/google-services.json`, and update `applicationId`/`namespace`
+  in `android/app/build.gradle.kts`.
+- **Signing.** Create an upload keystore and the git-ignored
+  `android/key.properties`:
+
+  ```properties
+  storePassword=<store password>
+  keyPassword=<key password>
+  keyAlias=upload
+  storeFile=/absolute/path/to/upload-keystore.jks
+  ```
+
+  Without it, release builds fall back to debug signing (fine for local
+  testing, rejected by Google Play).
+
+### Web hosting
+
+`firebase.json` serves `build/web` from Firebase Hosting with an SPA rewrite,
+security headers and no-cache headers for the app shell, so new releases load
+immediately:
+
+```shell
+flutter build web --release --dart-define=FCM_VAPID_KEY=YOUR_PUBLIC_VAPID_KEY
+firebase deploy --only hosting --project foodpandas-f2e83
+```
+
+### Local emulators
+
+```shell
+firebase emulators:start --only auth,firestore,functions
+flutter run -d chrome --dart-define=USE_FIREBASE_EMULATORS=true
+```

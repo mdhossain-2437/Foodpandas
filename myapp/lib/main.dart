@@ -4,11 +4,13 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 
-import 'firebase_options.dart';
+import 'bootstrap.dart';
 import 'models/food_order.dart';
+import 'screens/ai_assistant_page.dart';
 import 'screens/order_pages.dart';
 import 'screens/restaurant_directory_page.dart';
 import 'screens/auth/auth_pages.dart';
+import 'services/ai_assistant_service.dart';
 import 'services/auth_service.dart';
 import 'services/customer_profile_service.dart';
 import 'services/order_service.dart';
@@ -17,7 +19,19 @@ import 'services/restaurant_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  try {
+    await initializeFirebaseServices();
+  } catch (error, stack) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stack,
+        library: 'app startup',
+      ),
+    );
+    runApp(StartupErrorApp(error: error));
+    return;
+  }
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   runApp(const FoodPandasApp());
 }
@@ -36,6 +50,7 @@ class FoodPandasApp extends StatefulWidget {
     this.customerProfileService,
     this.orderService,
     this.restaurantService,
+    this.aiAssistantService,
     this.paymentLinkLauncher,
   });
 
@@ -43,6 +58,7 @@ class FoodPandasApp extends StatefulWidget {
   final CustomerProfileService? customerProfileService;
   final OrderService? orderService;
   final RestaurantService? restaurantService;
+  final AiAssistantService? aiAssistantService;
   final Future<void> Function(BuildContext context, String url)?
   paymentLinkLauncher;
 
@@ -57,6 +73,7 @@ class _FoodPandasAppState extends State<FoodPandasApp> {
   late final CustomerProfileService _customerProfileService;
   OrderService? _orderService;
   RestaurantService? _restaurantService;
+  late final AiAssistantService _aiAssistantService;
   PushNotificationService? _pushService;
   String? _pushUserId;
   StreamSubscription<AuthUser?>? _authSubscription;
@@ -80,6 +97,8 @@ class _FoodPandasAppState extends State<FoodPandasApp> {
         widget.customerProfileService ?? FirebaseCustomerProfileService();
     _orderService = widget.orderService ?? FirebaseOrderService();
     _restaurantService = widget.restaurantService ?? RestaurantService();
+    _aiAssistantService =
+        widget.aiAssistantService ?? FirebaseAiAssistantService();
     _authUser = _authService.currentUser;
     if (_authUser != null) _configurePush(_authUser!);
     _authSubscription = _authService.authStateChanges.listen((user) {
@@ -269,6 +288,10 @@ class _FoodPandasAppState extends State<FoodPandasApp> {
   }
 
   void _openVerifiedRestaurant(VerifiedRestaurant restaurant) {
+    _openVendor(_registerVerifiedRestaurant(restaurant));
+  }
+
+  Vendor _registerVerifiedRestaurant(VerifiedRestaurant restaurant) {
     final vendor = Vendor(
       id: restaurant.id,
       name: restaurant.name,
@@ -296,7 +319,50 @@ class _FoodPandasAppState extends State<FoodPandasApp> {
     );
     _verifiedVendors.removeWhere((entry) => entry.id == vendor.id);
     _verifiedVendors.add(vendor);
-    _openVendor(vendor);
+    return vendor;
+  }
+
+  Future<bool> _addSuggestionToCart(MenuSuggestion suggestion) async {
+    final item = suggestion.isSample
+        ? _sampleMenuItem(suggestion)
+        : await _verifiedMenuItem(suggestion);
+    if (item == null || !mounted) return false;
+    _changeQuantity(item, 1);
+    return true;
+  }
+
+  /// Sample stalls use `demo-<vendor id>` as their server-side restaurant ID.
+  MenuItem? _sampleMenuItem(MenuSuggestion suggestion) {
+    const prefix = 'demo-';
+    if (!suggestion.restaurantId.startsWith(prefix)) return null;
+    final vendorId = suggestion.restaurantId.substring(prefix.length);
+    return vendors
+        .where((vendor) => vendor.id == vendorId)
+        .expand((vendor) => vendor.menu)
+        .where((item) => item.id == suggestion.itemId)
+        .firstOrNull;
+  }
+
+  Future<MenuItem?> _verifiedMenuItem(MenuSuggestion suggestion) async {
+    var vendor = _verifiedVendors
+        .where((entry) => entry.id == suggestion.restaurantId)
+        .firstOrNull;
+    final restaurantService = _restaurantService;
+    if (vendor == null && restaurantService != null) {
+      final List<VerifiedRestaurant> restaurants;
+      try {
+        restaurants = await restaurantService.watchVerifiedRestaurants().first;
+      } on Exception {
+        return null;
+      }
+      final restaurant = restaurants
+          .where((entry) => entry.id == suggestion.restaurantId)
+          .firstOrNull;
+      if (restaurant != null) vendor = _registerVerifiedRestaurant(restaurant);
+    }
+    return vendor?.menu
+        .where((item) => item.catalogItemId == suggestion.itemId)
+        .firstOrNull;
   }
 
   void _changeQuantity(MenuItem item, int change) {
@@ -519,6 +585,22 @@ class _FoodPandasAppState extends State<FoodPandasApp> {
           restaurantService: _restaurantService,
           onOpenRestaurant: _openVerifiedRestaurant,
         );
+      case AppPage.assistant:
+        return AiAssistantPage(
+          key: const ValueKey('assistant'),
+          service: _aiAssistantService,
+          user: _authUser ?? _authService.currentUser,
+          onSignIn: () => setState(() {
+            _pendingPage = AppPage.assistant;
+            _page = AppPage.auth;
+          }),
+          onVerifyEmail: () {
+            _pendingPage = AppPage.assistant;
+            _openVerification();
+          },
+          onAddToCart: _addSuggestionToCart,
+          onOpenCart: () => _navigate(AppPage.cart),
+        );
       case AppPage.menu:
         final vendor = _selectedVendor;
         if (vendor == null) return const VendorListPage();
@@ -653,6 +735,7 @@ enum AppPage {
   restaurants,
   orders,
   notifications,
+  assistant,
 }
 
 class Vendor {
@@ -906,27 +989,51 @@ class _SiteHeader extends StatelessWidget {
                           ],
                         ),
                       ),
-                      const Spacer(),
-                      if (!compact) ...[
-                        _NavButton(
-                          label: 'Home',
-                          selected: activePage == AppPage.home,
-                          onTap: () => onNavigate(AppPage.home),
-                        ),
-                        _NavButton(
-                          label: 'Find food stalls',
-                          selected:
-                              activePage == AppPage.vendors ||
-                              activePage == AppPage.menu,
-                          onTap: () => onNavigate(AppPage.vendors),
-                        ),
-                        _NavButton(
-                          label: 'Restaurants',
-                          selected: activePage == AppPage.restaurants,
-                          onTap: () => onNavigate(AppPage.restaurants),
-                        ),
-                        const SizedBox(width: 12),
-                      ],
+                      // Scales the links down instead of overflowing when
+                      // large text settings or long labels exceed the space.
+                      Expanded(
+                        child: compact
+                            ? const SizedBox.shrink()
+                            : Align(
+                                alignment: Alignment.centerRight,
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _NavButton(
+                                        label: 'Home',
+                                        selected: activePage == AppPage.home,
+                                        onTap: () => onNavigate(AppPage.home),
+                                      ),
+                                      _NavButton(
+                                        label: 'Find food stalls',
+                                        selected:
+                                            activePage == AppPage.vendors ||
+                                            activePage == AppPage.menu,
+                                        onTap: () =>
+                                            onNavigate(AppPage.vendors),
+                                      ),
+                                      _NavButton(
+                                        label: 'Restaurants',
+                                        selected:
+                                            activePage == AppPage.restaurants,
+                                        onTap: () =>
+                                            onNavigate(AppPage.restaurants),
+                                      ),
+                                      _NavButton(
+                                        label: 'Ask AI',
+                                        selected:
+                                            activePage == AppPage.assistant,
+                                        onTap: () =>
+                                            onNavigate(AppPage.assistant),
+                                      ),
+                                      const SizedBox(width: 12),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                      ),
                       if (compact)
                         PopupMenuButton<AppPage>(
                           tooltip: 'Open navigation',
@@ -944,6 +1051,10 @@ class _SiteHeader extends StatelessWidget {
                             PopupMenuItem(
                               value: AppPage.restaurants,
                               child: Text('Restaurants'),
+                            ),
+                            PopupMenuItem(
+                              value: AppPage.assistant,
+                              child: Text('Ask AI'),
                             ),
                             PopupMenuItem(
                               value: AppPage.orders,
