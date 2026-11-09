@@ -1,58 +1,49 @@
 const { initializeApp } = require('firebase-admin/app');
 const { FieldValue, getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
+const { setGlobalOptions } = require('firebase-functions/v2');
+const logger = require('firebase-functions/logger');
 const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
-const { defineSecret } = require('firebase-functions/params');
+const { defineBoolean, defineInt, defineSecret, defineString } = require('firebase-functions/params');
 const { timingSafeEqual, randomUUID } = require('node:crypto');
 
+const { consumeDailyQuota } = require('./ai/quota');
+const { demoMenu } = require('./catalog/demo-menu');
+
 initializeApp();
+// Caps scale-out (and spend) of every function; raise deliberately when traffic grows.
+setGlobalOptions({ maxInstances: 10 });
 
 const db = getFirestore();
 const xenditSecretKey = defineSecret('XENDIT_SECRET_KEY');
 const xenditCallbackToken = defineSecret('XENDIT_CALLBACK_TOKEN');
-const demoMenu = {
-  'demo-tita-luz': {
-    name: 'Demo Tita Luz’s Kusina',
-    deliveryFee: 49,
-    items: {
-      adobo: { name: 'Chicken Adobo', price: 165 },
-      sinigang: { name: 'Sinigang na Baboy', price: 195 },
-      sisig: { name: 'Sizzling Pork Sisig', price: 185 },
-    },
-  },
-  'demo-mang-tonyo': {
-    name: 'Demo Mang Tonyo’s Ihaw-Ihaw',
-    deliveryFee: 49,
-    items: {
-      bbq: { name: 'Pork BBQ Meal', price: 145 },
-      liempo: { name: 'Inihaw na Liempo', price: 210 },
-      isaw: { name: 'Isaw & Betamax Combo', price: 99 },
-    },
-  },
-  'demo-ate-mels': {
-    name: 'Demo Ate Mel’s Meryenda',
-    deliveryFee: 49,
-    items: {
-      'halo-halo': { name: 'Special Halo-Halo', price: 120 },
-      turon: { name: 'Banana Turon (3 pcs)', price: 75 },
-      pancit: { name: 'Pancit Palabok', price: 135 },
-    },
-  },
-  'demo-lola-bebang': {
-    name: 'Demo Lola Bebang’s Panaderya',
-    deliveryFee: 49,
-    items: {
-      pandesal: { name: 'Pandesal (6 pcs)', price: 45 },
-      ensaymada: { name: 'Classic Ensaymada', price: 65 },
-      'ube-cheese': { name: 'Ube Cheese Pandesal (4 pcs)', price: 88 },
-    },
-  },
-};
+const geminiApiKey = defineSecret('GEMINI_API_KEY');
+const aiModel = defineString('AI_MODEL', {
+  default: 'gemini-3.6-flash',
+  description: 'Gemini model used by the menu assistant. Use a stable model ID.',
+});
+const aiDailyRequestLimit = defineInt('AI_DAILY_REQUEST_LIMIT', {
+  default: 20,
+  description: 'Menu assistant requests allowed per user per UTC day.',
+});
+const enforceAppCheck = defineBoolean('ENFORCE_APP_CHECK', {
+  default: false,
+  description: 'Reject callable requests without a valid Firebase App Check token.',
+});
+
+// Checked per request (rather than via the enforceAppCheck option, which reads
+// the param during deployment) so it can be switched on after clients ship tokens.
+function requireAppCheck(request) {
+  if (enforceAppCheck.value() && !request.app) {
+    throw new HttpsError('unauthenticated', 'This app could not be verified. Update the app and try again.');
+  }
+}
 
 exports.createOrder = onCall(
   { secrets: [xenditSecretKey] },
   async (request) => {
+    requireAppCheck(request);
     if (!request.auth) throw new HttpsError('unauthenticated', 'Sign in to place an order.');
     if (request.auth.token.email_verified !== true) {
       throw new HttpsError('permission-denied', 'Verify your email before ordering.');
@@ -229,7 +220,7 @@ exports.createOrder = onCall(
       });
       result = await response.json().catch(() => null);
     } catch (error) {
-      console.error('Xendit invoice request failed:', error.message);
+      logger.error('Xendit invoice request failed', { orderId, error: error.message });
       await markPaymentFailed(orderId);
       throw new HttpsError(
         'unavailable',
@@ -239,7 +230,11 @@ exports.createOrder = onCall(
     }
     if (!response.ok || typeof result?.id !== 'string' ||
         typeof result?.invoice_url !== 'string') {
-      console.error('Xendit rejected invoice creation:', response.status, result?.message);
+      logger.error('Xendit rejected invoice creation', {
+        orderId,
+        status: response.status,
+        message: result?.message,
+      });
       await markPaymentFailed(orderId);
       throw new HttpsError(
         'unavailable',
@@ -254,7 +249,10 @@ exports.createOrder = onCall(
         updatedAt: FieldValue.serverTimestamp(),
       });
     } catch (error) {
-      console.error('Could not save Xendit invoice to Firestore order:', error.message);
+      logger.error('Could not save Xendit invoice to Firestore order', {
+        orderId,
+        error: error.message,
+      });
       await markPaymentFailed(orderId);
       throw new HttpsError(
         'unavailable',
@@ -292,7 +290,7 @@ function configuredXenditSecretKey() {
     }
   } catch (error) {
     if (error instanceof HttpsError) throw error;
-    console.error('Xendit secret key is unavailable:', error.message);
+    logger.error('Xendit secret key is unavailable', { error: error.message });
   }
   throw new HttpsError(
     'failed-precondition',
@@ -393,6 +391,59 @@ exports.notifyOrderUpdate = onDocumentUpdated('orders/{orderId}', async (event) 
     });
   }
 });
+
+let loadMenuCatalog = null;
+
+exports.menuAssistant = onCall(
+  { secrets: [geminiApiKey], memory: '512MiB', timeoutSeconds: 60 },
+  async (request) => {
+    requireAppCheck(request);
+    if (!request.auth) throw new HttpsError('unauthenticated', 'Sign in to use the food assistant.');
+    if (request.auth.token.email_verified !== true) {
+      throw new HttpsError('permission-denied', 'Verify your email to use the food assistant.');
+    }
+    // Required lazily so Genkit does not slow down cold starts of the other functions.
+    const { MAX_QUERY_LENGTH, createCatalogLoader, normalizeQuery } = require('./ai/menu-assistant');
+    const { getMenuAssistantFlow } = require('./ai/genkit');
+
+    const query = normalizeQuery(request.data?.query);
+    if (!query) {
+      throw new HttpsError(
+        'invalid-argument',
+        `Describe what you are craving in 2 to ${MAX_QUERY_LENGTH} characters.`,
+      );
+    }
+    const uid = request.auth.uid;
+    const quota = await consumeDailyQuota(db, uid, { limit: aiDailyRequestLimit.value() });
+    loadMenuCatalog ??= createCatalogLoader({ db, demoMenu });
+    const model = aiModel.value();
+    const startedAt = Date.now();
+    try {
+      const flow = getMenuAssistantFlow({ modelName: model, loadCatalog: loadMenuCatalog });
+      const result = await flow({ query });
+      logger.info('menuAssistant answered', {
+        uid,
+        model,
+        promptVersion: result.promptVersion,
+        suggestions: result.suggestions.length,
+        latencyMs: Date.now() - startedAt,
+      });
+      return { ...result, remainingToday: quota.remaining };
+    } catch (error) {
+      logger.error('menuAssistant failed', {
+        uid,
+        model,
+        status: error?.status,
+        error: error?.message,
+        latencyMs: Date.now() - startedAt,
+      });
+      if (['FAILED_PRECONDITION', 'NOT_FOUND', 'PERMISSION_DENIED'].includes(error?.status)) {
+        throw new HttpsError('failed-precondition', 'The food assistant is not configured yet.');
+      }
+      throw new HttpsError('unavailable', 'The food assistant is busy right now. Please try again in a moment.');
+    }
+  },
+);
 
 function safeTokenEquals(suppliedToken, expectedToken) {
   const supplied = Buffer.from(suppliedToken);

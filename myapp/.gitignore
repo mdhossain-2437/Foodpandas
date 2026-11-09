@@ -32,7 +32,6 @@ migrate_working_dir/
 .pub/
 /build/
 /android/local.properties
-/ios/Flutter/Maps.xcconfig
 /coverage/
 
 # Symbolication related

@@ -120,8 +120,7 @@ class FirebaseOrderService implements OrderService {
     'invalid-argument' =>
       'Check the delivery details and cart, then try again.',
     'unavailable' => 'Could not reach the order or payment service. Try again.',
-    'internal' =>
-      'The payment service failed unexpectedly. Check that Firebase Functions are deployed and XENDIT_SECRET_KEY is configured.',
+    'internal' => 'The payment service failed unexpectedly. Check that Firebase Functions are deployed and XENDIT_SECRET_KEY is configured.',
     _ => 'Could not place the order ($code).',
   };
 

@@ -1,2 +1,1 @@
-#include? "Maps.xcconfig"
 #include "Generated.xcconfig"

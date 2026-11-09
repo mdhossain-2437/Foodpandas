@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
+import '../config/app_config.dart';
 import 'order_service.dart';
 
 @pragma('vm:entry-point')
@@ -38,7 +39,7 @@ class PushNotificationService {
         );
       });
       await _messaging.register(
-        vapidKey: kIsWeb ? const String.fromEnvironment('FCM_VAPID_KEY') : null,
+        vapidKey: kIsWeb ? AppConfig.fcmVapidKey : null,
         serviceWorkerScriptPath: kIsWeb ? 'firebase-messaging-sw.js' : null,
       );
       await _messaging.setForegroundNotificationPresentationOptions(

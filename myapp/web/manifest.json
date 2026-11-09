@@ -1,11 +1,11 @@
 {
-    "name": "myapp",
-    "short_name": "myapp",
+    "name": "Food-Pandas",
+    "short_name": "Food-Pandas",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#FFF9EF",
+    "theme_color": "#F47B20",
+    "description": "Order lutong-bahay favorites from the food stalls in your neighborhood.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

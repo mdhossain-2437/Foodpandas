@@ -1,12 +1,59 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:myapp/bootstrap.dart';
 import 'package:myapp/main.dart';
 import 'package:myapp/models/food_order.dart';
 import 'package:myapp/screens/order_pages.dart';
+import 'package:myapp/services/ai_assistant_service.dart';
 import 'package:myapp/services/auth_service.dart';
 import 'package:myapp/services/customer_profile_service.dart';
 import 'package:myapp/services/order_service.dart';
 import 'package:myapp/services/restaurant_service.dart';
+
+class _TestAiAssistantService implements AiAssistantService {
+  _TestAiAssistantService({this.answer, this.failure});
+
+  final MenuAssistantAnswer? answer;
+  final AiAssistantFailure? failure;
+  final List<String> queries = [];
+
+  @override
+  Future<MenuAssistantAnswer> suggestDishes(String query) async {
+    queries.add(query);
+    if (failure != null) throw failure!;
+    return answer!;
+  }
+}
+
+const _jollibeeMakati = VerifiedRestaurant(
+  id: 'jollibee-makati',
+  name: 'Jollibee',
+  branchName: 'Makati Branch',
+  address: 'Makati City',
+  category: 'Fast food',
+  imageUrl: '',
+  latitude: 14.55,
+  longitude: 121.02,
+  deliveryRadiusKm: 5,
+  deliveryFee: 35,
+  menu: [
+    VerifiedMenuItem(
+      id: 'chicken-joy',
+      name: 'Chickenjoy Meal',
+      description: 'Test verified item',
+      category: 'Chicken',
+      price: 129,
+      imageUrl: '',
+    ),
+  ],
+);
+
+void _useDesktopView(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1200, 1000);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
 
 class _TestOrderService implements OrderService {
   final List<FoodOrder> orders = [];
@@ -295,10 +342,7 @@ void main() {
     expect(find.byKey(const Key('payment-xendit-all')), findsOneWidget);
     expect(find.byKey(const Key('sample-order-notice')), findsNothing);
     expect(find.byKey(const Key('sample-payment-notice')), findsOneWidget);
-    expect(
-      find.byKey(const Key('browse-verified-restaurants')),
-      findsNothing,
-    );
+    expect(find.byKey(const Key('browse-verified-restaurants')), findsNothing);
     expect(
       tester
           .widget<RadioListTile<String>>(
@@ -308,9 +352,9 @@ void main() {
       isTrue,
     );
     expect(
-      tester.widget<RadioListTile<String>>(
-        find.byKey(const Key('payment-card')),
-      ).enabled,
+      tester
+          .widget<RadioListTile<String>>(find.byKey(const Key('payment-card')))
+          .enabled,
       isFalse,
     );
     expect(
@@ -456,22 +500,26 @@ void main() {
       '12 Sampaguita Street, Makati',
     );
     expect(
-      tester.widget<RadioListTile<String>>(
-        find.byKey(const Key('payment-ewallet')),
-      ).enabled,
+      tester
+          .widget<RadioListTile<String>>(
+            find.byKey(const Key('payment-ewallet')),
+          )
+          .enabled,
       isTrue,
     );
     expect(find.byKey(const Key('payment-card')), findsOneWidget);
     expect(
-      tester.widget<RadioListTile<String>>(
-        find.byKey(const Key('payment-card')),
-      ).enabled,
+      tester
+          .widget<RadioListTile<String>>(find.byKey(const Key('payment-card')))
+          .enabled,
       isTrue,
     );
     expect(
-      tester.widget<RadioListTile<String>>(
-        find.byKey(const Key('payment-xendit-all')),
-      ).enabled,
+      tester
+          .widget<RadioListTile<String>>(
+            find.byKey(const Key('payment-xendit-all')),
+          )
+          .enabled,
       isTrue,
     );
     await tester.tap(find.byKey(const Key('payment-ewallet')));
@@ -685,5 +733,140 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('AI assistant suggestions can be added to the cart', (
+    tester,
+  ) async {
+    _useDesktopView(tester);
+    final assistant = _TestAiAssistantService(
+      answer: const MenuAssistantAnswer(
+        summary: 'Warm sinigang or crispy Chickenjoy for a rainy day.',
+        remainingToday: 19,
+        suggestions: [
+          MenuSuggestion(
+            restaurantId: 'demo-tita-luz',
+            itemId: 'sinigang',
+            name: 'Sinigang na Baboy',
+            restaurantName: 'Tita Luz’s Kusina',
+            price: 195,
+            reason: 'Sour and comforting.',
+            isSample: true,
+          ),
+          MenuSuggestion(
+            restaurantId: 'jollibee-makati',
+            itemId: 'chicken-joy',
+            name: 'Chickenjoy Meal',
+            restaurantName: 'Jollibee – Makati Branch',
+            price: 129,
+            reason: 'Crispy and filling.',
+            isSample: false,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpWidget(
+      FoodPandasApp(
+        authService: _TestAuthService(),
+        restaurantService: _TestRestaurantService([_jollibeeMakati]),
+        aiAssistantService: assistant,
+      ),
+    );
+
+    await tester.tap(find.text('Ask AI'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('assistant-query')),
+      'Something warm for a rainy day',
+    );
+    await tester.tap(find.byKey(const Key('assistant-ask')));
+    await tester.pumpAndSettle();
+
+    expect(assistant.queries, ['Something warm for a rainy day']);
+    expect(
+      find.text('Warm sinigang or crispy Chickenjoy for a rainy day.'),
+      findsOneWidget,
+    );
+    expect(find.text('Sample menu'), findsOneWidget);
+    expect(find.text('19 assistant requests left today.'), findsOneWidget);
+    expect(find.byKey(const Key('assistant-disclaimer')), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const Key('assistant-add-demo-tita-luz-sinigang')),
+    );
+    await tester.pumpAndSettle();
+    final addVerified = find.byKey(
+      const Key('assistant-add-jollibee-makati-chicken-joy'),
+    );
+    await tester.ensureVisible(addVerified);
+    await tester.tap(addVerified);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('assistant-view-cart-demo-tita-luz-sinigang')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('header-cart')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Sinigang na Baboy'), findsOneWidget);
+    expect(find.textContaining('Chickenjoy Meal'), findsOneWidget);
+  });
+
+  testWidgets('AI assistant asks guests to sign in first', (tester) async {
+    _useDesktopView(tester);
+    final assistant = _TestAiAssistantService();
+    await tester.pumpWidget(
+      FoodPandasApp(
+        authService: _TestAuthService(signedIn: false),
+        aiAssistantService: assistant,
+      ),
+    );
+
+    await tester.tap(find.text('Ask AI'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('assistant-query')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('assistant-sign-in')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('auth-page')), findsOneWidget);
+    expect(assistant.queries, isEmpty);
+  });
+
+  testWidgets('AI assistant shows service errors', (tester) async {
+    _useDesktopView(tester);
+    final assistant = _TestAiAssistantService(
+      failure: const AiAssistantFailure(
+        'You have used all 20 assistant requests for today. Try again tomorrow.',
+      ),
+    );
+    await tester.pumpWidget(
+      FoodPandasApp(
+        authService: _TestAuthService(),
+        aiAssistantService: assistant,
+      ),
+    );
+
+    await tester.tap(find.text('Ask AI'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Something sour and soupy'));
+    await tester.pumpAndSettle();
+
+    expect(assistant.queries, ['Something sour and soupy']);
+    expect(
+      find.text(
+        'You have used all 20 assistant requests for today. Try again tomorrow.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('assistant-summary')), findsNothing);
+  });
+
+  testWidgets('startup failures show an explanatory screen', (tester) async {
+    await tester.pumpWidget(
+      StartupErrorApp(error: UnsupportedError('No Firebase options')),
+    );
+
+    expect(find.byKey(const Key('startup-error')), findsOneWidget);
+    expect(find.text('Food-Pandas could not start'), findsOneWidget);
   });
 }
